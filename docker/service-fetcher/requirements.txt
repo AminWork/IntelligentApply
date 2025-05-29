@@ -1,6 +1,7 @@
 fastapi==0.111.0
 uvicorn[standard]==0.29.0
-motor==3.4.0
+motor==3.7.1         # ← latest line that exists on PyPI
+pymongo>=4.10,<5     # ← matches Motor 3.7’s stated range
 faiss-cpu==1.8.0
 numpy==1.26.4
 httpx==0.27.0

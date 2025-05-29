@@ -1,5 +1,6 @@
 fastapi==0.111.0
 uvicorn[standard]==0.29.0
 faiss-cpu==1.8.0
-pydantic==2.7.1
 numpy==1.26.4
+pydantic==2.7.1
+packaging>=24.0      # ← adds the missing module
