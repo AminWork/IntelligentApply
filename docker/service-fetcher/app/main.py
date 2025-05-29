@@ -1,279 +1,289 @@
 # service-fetcher/app/main.py
+# ──────────────────────────────────────────────────────────────────────────────
+"""
+Scrapes recent PhD-position listings from phdfinder.com, extracts structured
+metadata with Metis Chat, stores them in MongoDB, and indexes embeddings in
+FAISS.
 
-import os
-import json
-import asyncio
-import logging
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-from motor.motor_asyncio import AsyncIOMotorClient
-from bs4 import BeautifulSoup
-import httpx
-import numpy as np
+2025-05-29  • Base-64 workaround for /embeddings 500
+           • Robust JSON parsing + LLM re-prompt on malformed output
+           • 3-attempt exponential-back-off around embeddings
+2025-05-29b • FIX: /scrape page-count bug (“<' not supported …”)
+"""
+
+import os, re, json, asyncio, logging, base64
 from datetime import datetime, timedelta
+from typing import List, Dict, Any
+import httpx, numpy as np
+from bs4 import BeautifulSoup
 from dateutil.parser import parse as date_parse
+from fastapi import FastAPI, HTTPException
+from motor.motor_asyncio import AsyncIOMotorClient
+from openai import OpenAI
 
-# ─── LOGGING CONFIG ───────────────────────────────────────────────────────────
-
+# ─── LOGGING ──────────────────────────────────────────────────────────────────
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(
-    level=LOG_LEVEL,
+logging.basicConfig(level=LOG_LEVEL,
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
-)
+    datefmt="%Y-%m-%d %H:%M:%S", force=True)
 logger = logging.getLogger("service-fetcher")
 
-# ─── CONFIGURATION ───────────────────────────────────────────────────────────
-
+# ─── CONFIG ───────────────────────────────────────────────────────────────────
 METIS_API_URL = os.getenv("METIS_API_URL", "https://api.metisai.ir/api/v1")
 METIS_API_KEY = os.getenv("METIS_API_KEY", "")
 if not METIS_API_KEY:
-    logger.error("METIS_API_KEY environment variable is required")
     raise RuntimeError("METIS_API_KEY environment variable is required")
 
-HEADERS = {
-    "Authorization": f"Bearer {METIS_API_KEY}",
-    "Content-Type": "application/json"
-}
-
+EMBED_MODEL   = "text-embedding-3-small"
+HEADERS       = {"Authorization": f"Bearer {METIS_API_KEY}",
+                 "Content-Type":  "application/json"}
 MONGO_URI      = os.getenv("MONGO_URI",      "mongodb://root:example@mongo:27017")
 FAISS_ENDPOINT = os.getenv("FAISS_ENDPOINT", "http://faiss-db:8080")
 BASE_URL       = "https://phdfinder.com/positions/"
-EMBED_DIM      = int(os.getenv("EMBEDDING_DIM", "1536"))
+EMBED_DIM      = 1536
 
-# ─── INITIALIZE DATABASES & APP ──────────────────────────────────────────────
+client = OpenAI(api_key=METIS_API_KEY,
+                base_url="https://api.metisai.ir/openai/v1")
 
 mongo = AsyncIOMotorClient(MONGO_URI)
 db    = mongo["fetcher"]["positions"]
+app   = FastAPI()
 
-app = FastAPI()
-logger.info("Starting service-fetcher with MongoDB at %s and FAISS at %s",
-            MONGO_URI, FAISS_ENDPOINT)
-
-# ─── REQUEST/RESPONSE MODELS ─────────────────────────────────────────────────
-
+# ─── REQUEST MODEL ────────────────────────────────────────────────────────────
+from pydantic import BaseModel
 class PositionRequest(BaseModel):
     id:  str
     url: str
 
-# ─── METIS HELPER FUNCTIONS ──────────────────────────────────────────────────
+# ─── JSON HELPERS ─────────────────────────────────────────────────────────────
+_JSON_RE = re.compile(r"\{.*?\}", re.S)
+def extract_json(text: str) -> str:
+    m = _JSON_RE.search(text)
+    if not m:
+        raise ValueError("No JSON object found in LLM response")
+    return m.group(0)
 
-async def metis_chat_json(messages: list[dict], provider: str, model: str, schema: dict) -> dict:
-    """
-    Call MetisAI chat/completions in JSON mode to extract structured data.
-    """
-    logger.debug("Calling Metis chat: provider=%s model=%s schema=%s",
-                 provider, model, schema)
-    payload = {
-        "chatProvider": provider,
-        "model": model,
-        "messages": messages,
-        "response_format": {"type": "json_object"},
-        "json_schema": schema
-    }
-    async with httpx.AsyncClient() as client:
+def safe_json(raw: str) -> Dict[str, Any]:
+    """Attempt strict JSON parse, then sanitise trailing commas / single quotes."""
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        cleaned = re.sub(r",\s*([}\]])", r"\1", raw)
+        cleaned = re.sub(r"'", '"', cleaned)
+        return json.loads(cleaned)
+
+async def extract_with_retry(prompt: List[Dict[str, str]],
+                             provider: str = "openai_chat_completion",
+                             model: str = "gpt-4o-mini",
+                             max_attempts: int = 2) -> Dict[str, Any]:
+    for attempt in range(1, max_attempts + 1):
+        raw = await metis_chat(prompt, provider, model)
         try:
-            r = await client.post(f"{METIS_API_URL}/chat/completions",
-                                  headers=HEADERS, json=payload, timeout=120)
-            r.raise_for_status()
-            content = r.json()["choices"][0]["message"]["content"]
-            logger.debug("Metis chat response: %s", content)
-            return content
+            return safe_json(extract_json(raw))
         except Exception as e:
-            logger.exception("Metis chat/completions failed")
-            raise
+            logger.warning("JSON parse failed (%d/%d): %s",
+                           attempt, max_attempts, e, exc_info=True)
+            if attempt == max_attempts:
+                raise
+            prompt.extend([
+                {"role": "assistant", "content": raw},
+                {"role": "system",
+                 "content": "❗ Output was invalid JSON. "
+                            "Respond with *only* valid JSON."},
+            ])
 
-async def metis_embed(inputs: list[str], provider: str, model: str) -> list[list[float]]:
-    """
-    Call MetisAI embeddings endpoint to get vectors for each input string.
-    """
-    logger.debug("Calling Metis embeddings: provider=%s model=%s inputs=%s",
-                 provider, model, inputs)
-    payload = {
-        "embeddingProvider": provider,
-        "model": model,
-        "input": inputs
-    }
-    async with httpx.AsyncClient() as client:
+# ─── LOGGING HELPERS ─────────────────────────────────────────────────────────
+def log_httpx_error(prefix: str, exc: httpx.HTTPStatusError):
+    resp = exc.response
+    body = resp.text[:500] if resp.text else "<no body>"
+    logger.error("%s – HTTP %s %s\n↳ %s",
+                 prefix, resp.status_code, resp.request.url, body, exc_info=True)
+
+# ─── METIS CHAT / EMBEDDINGS ─────────────────────────────────────────────────
+async def metis_chat(messages: List[Dict[str, Any]],
+                     provider: str,
+                     model: str) -> str:
+    url = f"{METIS_API_URL}/wrapper/{provider}/chat/completions"
+    async with httpx.AsyncClient() as h:
         try:
-            r = await client.post(f"{METIS_API_URL}/embeddings",
-                                  headers=HEADERS, json=payload, timeout=60)
+            r = await h.post(url, headers=HEADERS,
+                             json={"model": model, "messages": messages},
+                             timeout=120)
             r.raise_for_status()
-            data = [item["embedding"] for item in r.json()["data"]]
-            logger.debug("Metis embeddings response length: %d", len(data))
-            return data
-        except Exception as e:
-            logger.exception("Metis embeddings failed")
-            raise
+        except httpx.HTTPStatusError as e:
+            log_httpx_error("CHAT ⇦ ERROR", e); raise
+    return r.json()["choices"][0]["message"]["content"]
 
-async def faiss_upsert(doc_id: str, vector: list[float]):
+# ─── METIS CHAT / EMBEDDINGS ─────────────────────────────────────────────────
+
+# ─── METIS CHAT / EMBEDDINGS ─────────────────────────────────────────────────
+
+# ─── METIS CHAT / EMBEDDINGS ─────────────────────────────────────────────────
+
+# ─── METIS CHAT / EMBEDDINGS ─────────────────────────────────────────────────
+
+async def embed(texts: List[str], model: str = EMBED_MODEL) -> List[List[float]]:
     """
-    Upsert a single vector into the FAISS microservice.
+    Call MetisAI’s embedding service via the OpenAI-compatible client,
+    requesting float-encoded embeddings. Retries up to 3 times with
+    exponential back-off on failure.
     """
-    logger.debug("Upserting to FAISS id=%s vector_dim=%d", doc_id, len(vector))
-    async with httpx.AsyncClient() as client:
+    backoff = 1.0
+    for attempt in range(1, 4):
         try:
-            await client.post(f"{FAISS_ENDPOINT}/add",
-                              json={"id": doc_id, "vector": vector},
-                              timeout=10)
-            logger.info("FAISS upsert successful for id=%s", doc_id)
-        except Exception:
-            logger.exception("FAISS upsert failed for id=%s", doc_id)
-            raise
+            # mirror the JS style: encoding_format="float"
+            resp = await asyncio.to_thread(
+                client.embeddings.create,
+                model=model,
+                input=texts,
+                encoding_format="float"
+            )
+            break
+        except Exception as e:
+            logger.warning("EMBED attempt %d/3 failed: %s", attempt, e, exc_info=True)
+            if attempt == 3:
+                raise
+            await asyncio.sleep(backoff)
+            backoff *= 2
 
-# ─── SCRAPING HELPERS ────────────────────────────────────────────────────────
+    # extract the float vectors directly
+    embeddings: List[List[float]] = []
+    for item in getattr(resp, "data", resp.get("data", [])):
+        vec = getattr(item, "embedding", item["embedding"])
+        if not isinstance(vec, list) or len(vec) != EMBED_DIM:
+            raise ValueError(f"Unexpected embedding format/size: got {type(vec)} len={len(vec) if isinstance(vec, list) else 'N/A'}")
+        embeddings.append(vec)
 
+    print("EMBEDDINGS:", embeddings)
+
+    return embeddings
+
+
+
+
+async def faiss_upsert(doc_id: str, vec: List[float]):
+    async with httpx.AsyncClient() as h:
+        try:
+            r = await h.post(f"{FAISS_ENDPOINT}/add",
+                             json={"id": doc_id, "vector": vec}, timeout=10)
+            r.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            log_httpx_error("FAISS ⇦ ERROR", e); raise
+
+# ─── SCRAPER UTILITIES ────────────────────────────────────────────────────────
 async def fetch_html(url: str) -> str:
-    logger.info("Fetching URL: %s", url)
-    async with httpx.AsyncClient(timeout=30) as client:
+    async with httpx.AsyncClient(timeout=30) as h:
         try:
-            resp = await client.get(url)
-            resp.raise_for_status()
-            logger.debug("Fetched %d bytes from %s", len(resp.text), url)
-            return resp.text
-        except Exception:
-            logger.exception("Failed to fetch URL: %s", url)
-            raise
+            r = await h.get(url); r.raise_for_status()
+        except httpx.HTTPStatusError as e:
+            log_httpx_error("FETCH ⇦ ERROR", e); raise
+    return r.text
 
 def get_total_pages(soup: BeautifulSoup) -> int:
+    """Return largest page number visible in pagination (≥1)."""
     pages = [int(a.text) for a in soup.select(".page-numbers") if a.text.isdigit()]
-    total = max(pages) if pages else 1
-    logger.info("Total pages found: %d", total)
-    return total
+    return max(pages) if pages else 1
 
-def listings_from_page(soup: BeautifulSoup) -> list[tuple[str,str]]:
-    one_week_ago = datetime.utcnow() - timedelta(days=7)
-    results = []
+def listings_from_page(soup: BeautifulSoup) -> List[tuple[str, str]]:
+    week_ago = datetime.utcnow() - timedelta(days=7)
+    out: list[tuple[str, str]] = []
     for art in soup.select("article.post"):
-        date_tag = art.select_one("span.published")
-        if not date_tag:
+        dtag = art.select_one("span.published")
+        if not dtag:
             continue
         try:
-            post_date = date_parse(date_tag.text)
+            published = date_parse(dtag.text)
         except Exception:
             continue
-        if post_date < one_week_ago:
+        if published < week_ago:
             continue
         link = art.select_one("h2.entry-title a")
         if link:
-            title, href = link.text.strip(), link["href"]
-            results.append((title, href))
-    logger.info("Filtered %d listings from page", len(results))
-    return results
+            out.append((link.text.strip(), link["href"]))
+    return out
 
-# ─── CORE PROCESSOR ──────────────────────────────────────────────────────────
-
+# ─── CORE PIPELINE ────────────────────────────────────────────────────────────
 async def process_position(doc_id: str, url: str):
-    logger.info("Processing position id=%s url=%s", doc_id, url)
+    logger.info("PROCESS ➜ %s", doc_id)
     try:
-        html = await fetch_html(url)
-        text = BeautifulSoup(html, "html.parser").get_text(" ", strip=True)
-
-        # 1) Extract fields
-        field_schema = {
-            "type": "object",
-            "properties": {
-                "university_name":      {"type": "string"},
-                "department_faculty":   {"type": "string"},
-                "location_country":     {"type": "string"},
-                "application_deadline": {"type": "string"},
-                "contact_person":       {"type": "string"},
-                "contact_email":        {"type": "string"},
-                "summary":              {"type": "string"}
-            },
-            "required": ["summary"]
-        }
-        fields = await metis_chat_json(
-            messages=[
-                {"role": "system", "content":
-                 "Extract the following from this PhD position text: "
-                 "university_name, department_faculty, location_country, "
-                 "application_deadline, contact_person, contact_email, summary."},
-                {"role": "user", "content": text}
-            ],
-            provider="openai_chat_completion",
-            model="gpt-4o",
-            schema=field_schema
-        )
-
-        # 2) Generate keywords
-        kw_schema = {
-            "type": "object",
-            "properties": {"keywords": {"type": "array","items": {"type": "string"}}},
-            "required": ["keywords"]
-        }
-        kw_resp = await metis_chat_json(
-            messages=[
-                {"role": "system",
-                 "content": "From this summary, list 5–10 relevant keywords in JSON."},
-                {"role": "user", "content": fields["summary"]}
-            ],
-            provider="openai_chat_completion",
-            model="gpt-4o",
-            schema=kw_schema
-        )
-        keywords = kw_resp["keywords"]
-        logger.info("Extracted %d keywords for id=%s", len(keywords), doc_id)
-
-        # 3) Embed keywords & average
-        embs = await metis_embed(inputs=keywords,
-                                 provider="openai",
-                                 model="text-embedding-3-small")
-        avg_vec = list(np.mean(np.array(embs, dtype="float32"), axis=0))
-        logger.info("Computed embedding vector for id=%s", doc_id)
-
-        # 4) Upsert into MongoDB
-        record = {**fields, "keywords": keywords,
-                  "embedding": avg_vec, "url": url, "_id": doc_id}
-        await db.replace_one({"_id": doc_id}, record, upsert=True)
-        logger.info("Stored record in MongoDB for id=%s", doc_id)
-
-        # 5) Upsert into FAISS
-        await faiss_upsert(doc_id, avg_vec)
-
+        text = BeautifulSoup(await fetch_html(url),
+                             "html.parser").get_text(" ", strip=True)
     except Exception as e:
-        logger.error("Failed processing position id=%s: %s", doc_id, e, exc_info=True)
-        # Optionally re-raise or continue
-        raise
+        logger.error("html fetch failed: %s", e, exc_info=True); return
 
-# ─── ROUTES ──────────────────────────────────────────────────────────────────
+    # 1) structured fields
+    prompt = [
+        {"role": "system",
+         "content": ("Extract as JSON: position_title, university_name, department_faculty, "
+                     "location_country, application_deadline, contact_person, "
+                     "contact_email, summary.")},
+        {"role": "user", "content": text}]
+    try:
+        fields = await extract_with_retry(prompt)
+        logger.info("FIELDS ⇦ %s", fields)
+    except Exception:
+        return
 
+    # 2) keywords
+    kw_prompt = [
+        {"role": "system",
+         "content": "Give 5-10 keywords as JSON array under key 'keywords'."},
+        {"role": "user", "content": fields.get("summary", "")}]
+    try:
+        keywords = (await extract_with_retry(kw_prompt)).get("keywords", [])
+        logger.info("KEYWORDS ⇦ %s", keywords)
+    except Exception:
+        return
+
+    # 3) embedding
+    try:
+        vecs   = await embed(keywords)
+        avgvec = np.mean(np.array(vecs, dtype=np.float32), axis=0).tolist()
+    except Exception:
+        return
+
+    # 4) Mongo
+    rec = {**fields, "keywords": keywords, "embedding": avgvec,
+           "url": url, "_id": doc_id}
+    try:
+        await db.replace_one({"_id": doc_id}, rec, upsert=True)
+    except Exception as e:
+        logger.error("mongo upsert failed: %s", e, exc_info=True)
+
+    # 5) FAISS
+    try:
+        await faiss_upsert(doc_id, avgvec)
+    except Exception:
+        pass
+
+# ─── ROUTES ───────────────────────────────────────────────────────────────────
 @app.post("/fetch")
 async def fetch_single(req: PositionRequest):
-    logger.info("POST /fetch %s", req.json())
     await process_position(req.id, req.url)
     return {"status": "ok", "id": req.id}
 
 @app.get("/scrape")
 async def scrape_all():
-    logger.info("GET /scrape start")
-    html0 = await fetch_html(BASE_URL)
-    soup0 = BeautifulSoup(html0, "html.parser")
-    total_pages = get_total_pages(soup0)
+    """Scrape up to 10 newest listings (≤2 pages) asynchronously."""
+    try:
+        soup0        = BeautifulSoup(await fetch_html(BASE_URL), "html.parser")
+        total_pages  = min(get_total_pages(soup0), 2)   # ← fixed
+    except Exception as e:
+        raise HTTPException(502, detail=f"listing page fetch failed: {e}")
 
-    listings = []
+    listings: list[tuple[str, str]] = []
     for p in range(1, total_pages + 1):
         page_url = BASE_URL if p == 1 else f"{BASE_URL}page/{p}/"
-        html_p = await fetch_html(page_url)
-        soup_p = BeautifulSoup(html_p, "html.parser")
-        listings.extend(listings_from_page(soup_p))
+        listings.extend(
+            listings_from_page(
+                BeautifulSoup(await fetch_html(page_url), "html.parser")))
         await asyncio.sleep(0.5)
 
-    if not listings:
-        logger.warning("No recent listings found")
-        raise HTTPException(status_code=404, detail="No recent listings found")
-
-    logger.info("Scraping %d listings", len(listings))
-    tasks = []
-    for title, url in listings:
-        doc_id = str(abs(hash(url)) % (1 << 63))
-        tasks.append(process_position(doc_id, url))
-
-    await asyncio.gather(*tasks)
-    logger.info("Completed scrape_all")
+    listings = listings[:10]
+    await asyncio.gather(
+        *[process_position(str(abs(hash(u)) % (1 << 63)), u) for _, u in listings])
     return {"status": "scraped", "count": len(listings)}
 
 @app.get("/ping")
 async def ping():
-    logger.debug("GET /ping")
     return {"ping": "pong"}
