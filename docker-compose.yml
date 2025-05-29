@@ -1,0 +1,55 @@
+version: "3.9"
+
+services:
+  app: # This is the Chainlit app
+    build: .
+    ports:
+      - "8001:8000" # Changed host port to 8001 to avoid conflict with service-fetcher
+    volumes:
+      - .:/app
+      - .chainlit:/app/.chainlit
+    environment:
+      - CHAINLIT_API_KEY=${CHAINLIT_API_KEY}
+
+  mongo:
+    image: docker.arvancloud.ir/mongo:7
+    container_name: mongo
+    restart: always
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: root
+      MONGO_INITDB_ROOT_PASSWORD: example
+    volumes:
+      - mongo-data:/data/db
+    ports:
+      - "27017:27017"
+
+  faiss-db:
+    build: ./docker/faiss-db # Adjusted build context
+    container_name: faiss-db
+    depends_on:
+      - mongo
+    environment:
+      FAISS_INDEX_PATH: /app/data/index.faiss
+      EMBEDDING_DIM: 1536
+      SERVICE_PORT: 8080 # Internal port for the service
+    volumes:
+      - faiss-data:/app/data
+    ports:
+      - "8081:8080" # Changed host port to 8081 as service-fetcher might use 8080 internally, and app uses 8000
+
+  service-fetcher:
+    build: ./docker/service-fetcher # Adjusted build context
+    container_name: service-fetcher
+    depends_on:
+      - mongo
+      - faiss-db
+    environment:
+      MONGO_URI: mongodb://root:example@mongo:27017
+      FAISS_ENDPOINT: http://faiss-db:8080 # faiss-db internal port is 8080
+      SERVICE_PORT: 8000 # Internal port for the service
+    ports:
+      - "8000:8000" # This service will use host port 8000
+
+volumes:
+  mongo-data:
+  faiss-data: 

@@ -20,8 +20,8 @@ def search_jobs(interests: str, location: str = None, remote_only: bool = False)
 
 @cl.on_chat_start
 async def start():
-    await cl.Message("👋 Hello! I’m your Academic Agent Assistant.").send()
-    await cl.Message("Tell me your research interests and job preferences.").send()
+    await cl.Message("👋 Hello! I'm your AI assistant for applying to PhD academic positions.").send()
+    await cl.Message("I can help you find relevant positions, draft cover letters and emails, and manage your applications. Let's get started!").send()
 
     # Ask for research interest
     interests = await cl.AskUserMessage(content="🔍 What is your primary research interest?").send()
@@ -48,3 +48,25 @@ async def start():
         await cl.Message(
             content=f"**{job['title']}**\n📍 {job['institution']} ({job['location']})\n🖥 Remote: {'Yes' if job['remote'] else 'No'}"
         ).send()
+
+
+@cl.on_message
+async def on_message(message: cl.Message):
+    # Placeholder for message content and file
+    message_content = message.content
+    uploaded_file = None
+
+    # Check for file attachments
+    if message.elements:
+        for element in message.elements:
+            if "application/pdf" in getattr(element, "mime", ""):
+                uploaded_file = element # Store the file element
+                # For now, we can print to confirm, will be replaced by actual processing
+                print(f"Received PDF: {element.name}") 
+                break # Assuming one PDF attachment for now
+    
+    # For now, we can print to confirm, will be replaced by actual processing
+    print(f"Received message: {message_content}")
+
+    # Further processing will be added in the next steps
+    pass
