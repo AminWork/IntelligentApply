@@ -1,5 +1,5 @@
 # Use an official Python runtime as a parent image
-FROM docker.arvancloud.ir/python:3.9-slim
+FROM docker.arvancloud.ir/python:3.12-slim
 
 WORKDIR /app
 
