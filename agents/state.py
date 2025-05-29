@@ -3,7 +3,7 @@ from typing import List, Dict, Optional, Any
 
 @dataclass
 class ChatState:
-    stage: str = "fallback"                      # Current high-level stage
+    stage: str = "dispatcher"                    # Current high-level stage
     user_message: str = ""                       # Latest user utterance
     resume: Optional[Dict[str, Any]] = None      # Parsed résumé
     preferences: Optional[Dict[str, Any]] = None # User’s filters
@@ -12,3 +12,5 @@ class ChatState:
     emails_sent: bool = False
     replies: List[Dict[str, Any]] = field(default_factory=list)
     follow_up_done: bool = False                 # After follow-up completed
+    llm_response=None
+    result=None

@@ -1,23 +1,23 @@
+from openai import OpenAI
 import os
-from typing import Any
-import openai
 
 class OpenAILLM:
-    def __init__(self, api_key: str = None, model: str = "gpt-3.5-turbo"):
-        self.api_key = api_key or os.getenv("OPENAI_API_KEY")
-        base_url="https://api.metisai.ir/openai/v1"
-        self.model = model
+    def __init__(self, api_key=None, model="gpt-4o-mini"):
+        self.api_key = "tpsg-b1MsaOzQ0DhJ9ULVYLxaX2j7hwmC1DJ"
         if not self.api_key:
-            raise ValueError("OpenAI API key must be provided via argument or OPENAI_API_KEY env variable.")
-        openai.api_key = self.api_key
-        openai.base_url = base_url
+            raise ValueError("API key must be set")
+        self.client = OpenAI(api_key=self.api_key, base_url="https://api.metisai.ir/openai/v1")
+        self.model = model
 
     def __call__(self, prompt: str, **kwargs) -> str:
-        response = openai.ChatCompletion.create(
-            model=self.model,
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-            max_tokens=256,
-            **kwargs
-        )
-        return response["choices"][0]["message"]["content"]
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0,
+                max_tokens=256,
+                **kwargs
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            raise RuntimeError(f"OpenAI call failed: {e}")

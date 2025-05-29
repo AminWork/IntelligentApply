@@ -9,41 +9,23 @@ async def start():
     cl.user_session.set("state", ChatState())
 
 @cl.on_message
-async def on_message(message: cl.Message):
-    # Retrieve or initialize conversation state
-    state = cl.user_session.get("state")
+async def on_message(msg: cl.Message):
+    state: ChatState = cl.user_session.get("state")
     if not isinstance(state, ChatState):
         if state is not None:
             state = ChatState(**dict(state))
         else:
             state = ChatState()
+    state.user_message = msg.content
+    updated_state = lang_graph.invoke(state)
+    # Ensure updated_state is a ChatState instance
+    if not isinstance(updated_state, ChatState):
+        updated_state = ChatState(**dict(updated_state))
+    cl.user_session.set("state", updated_state)
 
-    # Handle file upload (if any)
-    uploaded_file = None
-    if message.elements:
-        for element in message.elements:
-            if "application/pdf" in getattr(element, "mime", ""):
-                uploaded_file = element
-                state.resume = {"uploaded": True, "filename": element.name}
-                break
-
-    # Update state with user message
-    state.user_message = message.content
-
-    # Run the langgraph
-    state = lang_graph.invoke(state)
-
-    # Respond based on the new state
-    if state.stage == "intake":
-        await cl.Message("📥 I see you're interested in applying! Please upload your résumé and let me know your preferences.").send()
-    elif state.stage == "check_replies":
-        await cl.Message("🔎 Checking for replies from professors...").send()
-    elif state.stage == "follow_up":
-        await cl.Message("🔁 Time to send polite follow-ups or schedule an interview coach.").send()
-    elif state.stage == "END":
-        await cl.Message("🏁 Conversation finished. Thank you for using the Academic Apply Assistant!").send()
-    else:
-        await cl.Message("🤖 How can I assist you today? You can upload your résumé or ask about our service.").send()
-
-    # Save updated state
-    cl.user_session.set("state", state)
+    # Show LLM or fallback response if available
+    # if hasattr(updated_state, "reply") and updated_state.reply is not None:
+    #     await cl.Message(str(updated_state.reply)).send()
+    await cl.Message(str(updated_state.llm_response)).send()
+    # else:
+    #     await cl.Message(f"Moved to stage: {getattr(updated_state, 'stage', 'unknown')}").send()
