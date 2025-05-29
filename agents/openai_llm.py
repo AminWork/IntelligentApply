@@ -9,15 +9,20 @@ class OpenAILLM:
         self.client = OpenAI(api_key=self.api_key, base_url="https://api.metisai.ir/openai/v1")
         self.model = model
 
-    def __call__(self, prompt: str, **kwargs) -> str:
+    def __call__(self, messages, **kwargs) -> str:
         try:
+            print(f"[OpenAILLM DEBUG] Making API call to model {self.model} with messages: {messages}...")
             response = self.client.chat.completions.create(
                 model=self.model,
-                messages=[{"role": "user", "content": prompt}],
+                messages=messages,
                 temperature=0,
-                max_tokens=256,
+                max_tokens=512,
                 **kwargs
             )
             return response.choices[0].message.content
         except Exception as e:
+            print(f"[ERROR in OpenAILLM] OpenAI call failed: {e}")
+            import traceback
+            print(traceback.format_exc())
+            # Ensure a string is raised, consistent with type hint, though it will be caught by fallback
             raise RuntimeError(f"OpenAI call failed: {e}")
