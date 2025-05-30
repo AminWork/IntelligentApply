@@ -115,70 +115,70 @@ async def handle_retrieve_positions(message: cl.Message):
 
     if user_input == "yes":
         print("[RETRIEVE] User confirmed 'yes'. Proceeding to retrieve positions.")
-        job_preferences_json_str = cl.user_session.get("job_preferences_json")
-        if not job_preferences_json_str:
+    job_preferences_json_str = cl.user_session.get("job_preferences_json")
+    if not job_preferences_json_str:
             print("[RETRIEVE] Critical: No job preferences found in session after 'yes'. Re-routing.")
             return "It seems your preferences were not saved correctly. Let's try specifying them again.", STATE_RECEIVE_PREFERENCES
 
-        print(f"[RETRIEVE] Job preferences for embedding: {job_preferences_json_str}")
+    print(f"[RETRIEVE] Job preferences for embedding: {job_preferences_json_str}")
 
-        try:
-            # 1. Generate embedding for the preferences
-            # Assuming the client has a method like `get_embedding`
-            # You might need to adjust this based on your llm.OpenAILLM implementation
-            preference_embedding = await asyncio.to_thread(client.get_embedding, job_preferences_json_str)
-            
-            if not preference_embedding or len(preference_embedding) != 1536:
-                print(f"[RETRIEVE] Failed to generate a valid 1536-dim embedding. Embedding: {preference_embedding}")
-                return "Sorry, I couldn't process your preferences to find positions at the moment. Please try again later.", STATE_RECEIVE_PREFERENCES
+    try:
+        # 1. Generate embedding for the preferences
+        # Assuming the client has a method like `get_embedding`
+        # You might need to adjust this based on your llm.OpenAILLM implementation
+        preference_embedding = await asyncio.to_thread(client.get_embedding, job_preferences_json_str)
+        
+        if not preference_embedding or len(preference_embedding) != 1536:
+            print(f"[RETRIEVE] Failed to generate a valid 1536-dim embedding. Embedding: {preference_embedding}")
+            return "Sorry, I couldn't process your preferences to find positions at the moment. Please try again later.", STATE_RECEIVE_PREFERENCES
 
-            # 2. Query FAISS DB
-            faiss_query_payload = {
-                "vector": preference_embedding,
-                "k": 5  # Retrieve top 5 positions
-            }
-            faiss_db_url = "http://faiss-db:8080/search" 
-            # Use the service name `faiss-db` as defined in docker-compose, port 8080
-            
-            print(f"[RETRIEVE] Querying FAISS DB at {faiss_db_url} with k=5")
-            async with httpx.AsyncClient() as http_client:
-                response = await http_client.post(faiss_db_url, json=faiss_query_payload, timeout=10.0)
-                response.raise_for_status() # Raise an exception for bad status codes (4xx or 5xx)
-                faiss_results = response.json()
-            
-            position_ids = faiss_results.get("ids", [])
-            # distances = faiss_results.get("distances", []) # We can use distances later if needed
+        # 2. Query FAISS DB
+        faiss_query_payload = {
+            "vector": preference_embedding,
+            "k": 5  # Retrieve top 5 positions
+        }
+        faiss_db_url = "http://faiss-db:8080/search" 
+        # Use the service name `faiss-db` as defined in docker-compose, port 8080
+        
+        print(f"[RETRIEVE] Querying FAISS DB at {faiss_db_url} with k=5")
+        async with httpx.AsyncClient() as http_client:
+            response = await http_client.post(faiss_db_url, json=faiss_query_payload, timeout=10.0)
+            response.raise_for_status() # Raise an exception for bad status codes (4xx or 5xx)
+            faiss_results = response.json()
+        
+        position_ids = faiss_results.get("ids", [])
+        # distances = faiss_results.get("distances", []) # We can use distances later if needed
 
-            if not position_ids:
-                print("[RETRIEVE] No position IDs found from FAISS.")
-                return "I couldn't find any matching positions based on your preferences right now. You might want to try broadening your criteria.", STATE_RECEIVE_PREFERENCES
+        if not position_ids:
+            print("[RETRIEVE] No position IDs found from FAISS.")
+            return "I couldn't find any matching positions based on your preferences right now. You might want to try broadening your criteria.", STATE_RECEIVE_PREFERENCES
 
-            print(f"[RETRIEVE] Retrieved position IDs from FAISS: {position_ids}")
+        print(f"[RETRIEVE] Retrieved position IDs from FAISS: {position_ids}")
 
-            # For now, just return the IDs. 
-            # TODO: Fetch position names/details from MongoDB using these IDs.
-            positions_message = "Here are the IDs of some positions that might match your preferences:\n\n" + "\n".join([f"- ID: {pid}" for pid in position_ids])
-            
-            # Placeholder for actual position names
-            # We will need to implement a lookup from MongoDB here
-            # For example: position_names = await fetch_position_names_from_mongo(position_ids)
-            # positions_message = "Here are some positions based on your preferences:\n\n" + "\n".join(position_names)
+        # For now, just return the IDs. 
+        # TODO: Fetch position names/details from MongoDB using these IDs.
+        positions_message = "Here are the IDs of some positions that might match your preferences:\n\n" + "\n".join([f"- ID: {pid}" for pid in position_ids])
+        
+        # Placeholder for actual position names
+        # We will need to implement a lookup from MongoDB here
+        # For example: position_names = await fetch_position_names_from_mongo(position_ids)
+        # positions_message = "Here are some positions based on your preferences:\n\n" + "\n".join(position_names)
 
-            print("[STATE] Positions retrieved, moving to send email.")
-            return positions_message, STATE_SEND_EMAIL
+        print("[STATE] Positions retrieved, moving to send email.")
+        return positions_message, STATE_SEND_EMAIL
 
-        except httpx.HTTPStatusError as e:
-            print(f"[RETRIEVE] HTTP error connecting to FAISS DB: {e}")
-            return "Sorry, I'm having trouble searching for positions right now (FAISS service error). Please try again later.", STATE_RECEIVE_PREFERENCES
-        except httpx.RequestError as e:
-            print(f"[RETRIEVE] Request error connecting to FAISS DB: {e}")
-            return "Sorry, I'm having trouble searching for positions right now (FAISS connection error). Please try again later.", STATE_RECEIVE_PREFERENCES
-        except Exception as e:
-            print(f"[RETRIEVE] An unexpected error occurred: {e}")
-            # Log the full traceback for debugging
-            import traceback
-            traceback.print_exc()
-            return "An unexpected error occurred while trying to find positions. Please try again.", STATE_RECEIVE_PREFERENCES
+    except httpx.HTTPStatusError as e:
+        print(f"[RETRIEVE] HTTP error connecting to FAISS DB: {e}")
+        return "Sorry, I'm having trouble searching for positions right now (FAISS service error). Please try again later.", STATE_RECEIVE_PREFERENCES
+    except httpx.RequestError as e:
+        print(f"[RETRIEVE] Request error connecting to FAISS DB: {e}")
+        return "Sorry, I'm having trouble searching for positions right now (FAISS connection error). Please try again later.", STATE_RECEIVE_PREFERENCES
+    except Exception as e:
+        print(f"[RETRIEVE] An unexpected error occurred: {e}")
+        # Log the full traceback for debugging
+        import traceback
+        traceback.print_exc()
+        return "An unexpected error occurred while trying to find positions. Please try again.", STATE_RECEIVE_PREFERENCES
     else: # Handles "no" and any other input
         if user_input == "no":
             print("[RETRIEVE] User responded 'no'. Returning to preference collection.")
@@ -236,10 +236,35 @@ async def start():
 @cl.on_message
 async def on_message(message: cl.Message):
     user_state = cl.user_session.get("user_state") or STATE_RECEIVE_RESUME
-    print(f"[STATE] on_message called. Current state: {user_state}. Message elements: {message.elements}")
-    handler = state_handlers.get(user_state, handle_receive_resume)
-    response, next_state = await handler(message)
-    print(f"[STATE] Handler returned. Next state: {next_state}")
-    if response is not None:  # Only send message if there's a response
-        cl.user_session.set("user_state", next_state)
-        await cl.Message(content=response).send()
+    print(f"[STATE] on_message called. Current state: {user_state}. Message content: '{message.content}'. Elements: {message.elements}")
+    
+    handler = state_handlers.get(user_state)
+    if not handler:
+        print(f"[STATE] Error: No handler found for state {user_state}. Resetting to STATE_RECEIVE_RESUME.")
+        cl.user_session.set("user_state", STATE_RECEIVE_RESUME)
+        await cl.Message(content="Sorry, something went wrong with my internal state. Let's start over. Please upload your resume.").send()
+        return
+
+    handler_output = await handler(message)
+    
+    if handler_output is None:
+        print(f"[STATE] Critical Error: Handler for state {user_state} returned None. This indicates an issue in the handler's logic. Resetting.")
+        cl.user_session.set("user_state", STATE_RECEIVE_RESUME)
+        await cl.Message(content="An unexpected error occurred with the flow. Please try again from the beginning.").send()
+        return
+
+    response_content, next_state_value = handler_output
+    
+    print(f"[STATE] Handler for '{user_state}' returned. Response: '{response_content}'. Next state: '{next_state_value}'")
+
+    # Always update the state if a next_state is provided by the handler
+    if next_state_value is not None:
+        cl.user_session.set("user_state", next_state_value)
+        print(f"[STATE] State updated to: {next_state_value}")
+    else:
+        # This case means the handler intends to stay in the current state or an error in logic.
+        print(f"[STATE] Handler for '{user_state}' did not specify a next_state. Staying in current state: {user_state}")
+
+    # Send a message only if response_content is not None (and not an empty string)
+    if response_content:
+        await cl.Message(content=response_content).send()
