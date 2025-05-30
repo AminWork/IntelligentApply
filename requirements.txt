@@ -1,10 +1,6 @@
 langgraph
 langchain
 chainlit
-langchain_community
-langchain-together
-langchain-openai
-langchain_anthropic
 matplotlib
 fastapi
 uvicorn
@@ -12,3 +8,4 @@ mysql-connector-python
 pandas
 scikit-learn
 PyPDF2
+httpx
