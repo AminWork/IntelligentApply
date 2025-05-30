@@ -26,19 +26,19 @@ if __name__ == '__main__':
 
 # Conditional import for config variables
 if __name__ == '__main__':
-    from app_document_pipeline.config import (
+    from mailer.config import (
         DEFAULT_TEMPERATURE_DRAFTING,
         MAX_OUTPUT_TOKENS_DRAFT_CL_BODY,
         MODULE_LOG_LEVEL,
         ECONOMICAL_MODEL_ID
     )
-    from app_document_pipeline.llm_services.metis_gemini_client import (
+    from mailer.llm_services.metis_gemini_client import (
         get_economical_model,
         generate_text_from_model,
         _is_genai_globally_configured_for_metis as _is_llm_service_configured,
         _genai_global_config_error_message as _llm_service_config_error
     )
-    from app_document_pipeline.prompts import TEMPLATE_COVER_LETTER
+    from mailer.prompts import TEMPLATE_COVER_LETTER
 
     logging.basicConfig(level=MODULE_LOG_LEVEL, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 else:

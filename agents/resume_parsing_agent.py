@@ -7,42 +7,19 @@ Your output should be a clean JSON object with the following fields:
 {
   "full_name": "",
   "email": "",
-  "phone": "",
+  "website": "",
+  "linkedin": "",
+  "summary": "",
   "current_location": "",
-  "desired_location": "",
-  "education": [
-    {
-      "degree": "",
-      "field": "",
-      "institution": "",
-      "graduation_year": ""
-    }
-  ],
-  "research_interests": [],
-  "technical_skills": [],
-  "publications": [
-    {
-      "title": "",
-      "venue": "",
-      "year": "",
-      "link": ""
-    }
-  ],
-  "work_experience": [
-    {
-      "role": "",
-      "organization": "",
-      "start_date": "",
-      "end_date": "",
-      "description": ""
-    }
-  ],
+  "education": "",
+  "research_experience": [],
+  "work_experience": "",
+  "publication": "",
   "languages": [],
-  "web_links": {
-    "LinkedIn": "",
-    "GoogleScholar": "",
-    "PersonalWebsite": ""
-  }
+  "skills": [],
+  "research_interests": [],
+  "scores": "",
+  "honors_awards": []
 }
 
 Follow these instructions:
